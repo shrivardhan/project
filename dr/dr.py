@@ -9,12 +9,12 @@ import sys
 # cp = cProfile.Profile()
 
 
-filename = 'sequence.fasta'
-filename1 = 'sequence_f.fasta'
-filename2 = 'sequence_c.fasta'
-max_window_size = 31
+hostfilename = 'sequence.fasta'
+targetfilename = 'sequence_c.fasta'
+max_window_size = 40
 num_samples = 1000
 iid_samples = 1000
+points = [0.05, 0.5, 0.95]
 # counter to count the number of unique sequences generated that are not present in original sequence
 ze = 0
 
@@ -154,13 +154,84 @@ def GetDictSW(new_sequence, window_size, default_window_slices, index, list_wind
     return list_window_slices
 
 def GetIntersectionSW(list_window_slices, window_size):
-    global max_window_size
     window_slice = list_window_slices.get(window_size)
     base = window_slice.get('b').keys()
     del window_slice['b']
     mutation = window_slice.get(0).keys()
     inter = set(base).intersection(set(mutation))
     return inter
+
+def GetIntersectionB(new_sequence, default_window_slices, list_window_slices, max_window_size):
+    window_size = 0
+    low = 0
+    max = max_window_size
+    while True:
+        window_size = int((low+max)/2)
+        if max <= low:
+            break
+        list_window_slices = GetDictSW(new_sequence, window_size, default_window_slices, 0, list_window_slices)
+        inter = GetIntersectionSW(list_window_slices, window_size)
+        if len(inter) == 0:
+            max = window_size - 1
+        else:
+            low = window_size + 1
+    list_window_slices = GetDictSW(new_sequence, window_size, default_window_slices, 0, list_window_slices)
+    inter = GetIntersectionSW(list_window_slices, window_size)
+    if len(inter) > 0:
+        window_size += 1
+    return window_size
+
+def GetIntersectionL(new_sequence, default_window_slices, list_window_slices, max_window_size):
+    max_match = max_window_size
+    for window_size in range(max_window_size-1,0,-1):
+        list_window_slices = GetDictSW(new_sequence, window_size, default_window_slices, 0, list_window_slices)
+        inter = GetIntersectionSW(list_window_slices, window_size)
+        if len(inter) > 0:
+            break
+        max_match = window_size
+    return max_match
+
+def GetSimRes(content, default_window_slices, num_samples, max_window_size,lab):
+    seq = GetSequence(content)
+    prob_dist = GetProbDist(seq)
+    sim_res = {}
+    for i in range(max_window_size):
+        sim_res[i] = 0
+
+    for index in range(num_samples):
+        # for markov model
+        new_sequence = GenerateSeq(prob_dist, content, len(content))
+        # for sliding window IID model
+        # new_sequence = GetIndependentSeq(len(content))
+
+        # list_window_slices = GetDict(new_sequence, max_window_size, default_window_slices, 0)
+        list_window_slices = {}
+
+        max_match = GetIntersectionB(new_sequence, default_window_slices, list_window_slices, max_window_size)
+
+        print('sample:',index,', max windows size match:',max_match)
+
+        for i in range(max_match):
+            sim_res[i] += 1
+
+        # match = SequenceMatcher(None, new_sequence, content).find_longest_match(0, len(new_sequence), 0, len(content))
+        # print(match)
+    for i in range(max_window_size):
+        sim_res[i] = 1 - float(sim_res[i])/num_samples
+    sim_res = list(sim_res.values())
+    # plt.plot(sim_res, label = lab)
+    return sim_res
+
+def CreateSequence(content, filename, firstLine = "Generated sequence with Markov Model \n"):
+    seq = GetSequence(content)
+    prob_dist = GetProbDist(seq)
+    new_sequence = GenerateSeq(prob_dist, content, len(content))
+    default_window_slices = GetDefaultDict(max_window_size, new_sequence)
+    f = open(filename, "w")
+    f.write(firstLine)
+    f.write(new_sequence)
+    f.close()
+    return default_window_slices
 
 # get the contents from file
 def getContents(filename):
@@ -172,20 +243,29 @@ def getContents(filename):
             contents += x.strip()
     return contents
 
-def main(model):
-    global filename, filename1, max_window_size, num_samples, cp
-    content_bacteria = getContents(filename)
-    content_bacteria_circular = getContents(filename2)
-    # content_fungi = getContents(filename1)
-    gc_bacteria = GetProb(content_bacteria)
-    gc_bacteria_circular = GetProb(content_bacteria_circular)
-    # gc_fungi = GetProb(content_fungi)
-    default_window_slices = GetDefaultDict(max_window_size, content_bacteria)
+def getPoint(point, arr):
+    xub,xlb,yub,ylb = 0, 0, 0, 0
+    for idx,i in enumerate(arr):
+        if i < point:
+            xlb = idx
+            ylb = i
+        if i > point:
+            yub = i
+            xub = idx
+            break
+    m = float(yub-ylb)/float(xub-xlb)
+    x = xlb + float(point - ylb)/m
+    return x
 
+def main(model):
+    global hostfilename, targetfilename, max_window_size, cp, points, num_samples
+    content_host = getContents(hostfilename)
+    gc_host = GetProb(content_host)
+    default_window_slices = GetDefaultDict(max_window_size, content_host)
     # iid model
     if model == 'i':
         list_window_slices = GetIIDDict(max_window_size,default_window_slices)
-        val = GetVal(1,len(content_bacteria),GetProb('AGCT'),gc_bacteria, max_window_size, 'IIDformula')
+        val = GetVal(1,len(content_host),GetProb('AGCT'),gc_host, max_window_size, 'IIDformula')
         all_ratio = GetIntersection(list_window_slices)
         print(all_ratio[0])
         print(val)
@@ -195,95 +275,39 @@ def main(model):
         plt.legend()
         plt.savefig('intersectionsIID.png')
         plt.show()
+
     # sliding window model
-    elif model == 's':
-        seq = GetSequence(content_bacteria)
-        prob_dist = GetProbDist(seq)
-        sim_res = {}
-        for i in range(max_window_size):
-            sim_res[i] = 0
+    else:
+        # compare with self
+        if model == 's':
+            content_target = content_host
+            gc_target = gc_host
+        # compare with another sequence
+        elif model == 'n':
+            content_target = getContents(targetfilename)
+            gc_target = GetProb(content_target)
+        sim_res = GetSimRes(content_target, default_window_slices, num_samples, max_window_size, 'Sliding:Simulation')
 
-        for index in range(num_samples):
-            # index variable is used to store the results for different sims. Due to mem constraints, it is not currently. [index = 0 is used]
+        val = GetVal(len(content_host), len(content_target), gc_host, gc_target, max_window_size, 'Sliding:Formula')
 
-            # for markov model
-            new_sequence = GenerateSeq(prob_dist, content_bacteria, len(content_bacteria))
-            # for sliding window IID model
-            # new_sequence = GetIndependentSeq(len(content_bacteria))
-
-            # list_window_slices = GetDict(new_sequence, max_window_size, default_window_slices, 0)
-            list_window_slices = {}
-
-            for window_size in range(max_window_size-1,0,-1):
-                list_window_slices = GetDictSW(new_sequence, window_size, default_window_slices, 0, list_window_slices)
-                inter = GetIntersectionSW(list_window_slices, window_size)
-                if len(inter) > 1:
-                    break
-                max_match = window_size
-
-            print('sample:',index,', max windows size match:',max_match)
-
-            for i in range(max_match):
-                sim_res[i] += 1
-
-            # match = SequenceMatcher(None, new_sequence, content_bacteria).find_longest_match(0, len(new_sequence), 0, len(content_bacteria))
-            # print(match)
-        for i in range(max_window_size):
-            sim_res[i] = 1 - float(sim_res[i])/num_samples
-        val = GetVal(len(content_bacteria), len(content_bacteria), gc_bacteria, gc_bacteria, max_window_size, 'Slidingformula')
-        print(list(sim_res.values()))
-        print(val)
+        print('Values from Simulation: ', sim_res)
+        print('Values from formula: ', val)
         print(ze)
-        plt.plot(list(sim_res.values()), label = 'Sliding:Simulation')
+        print('For theoretical values -')
+        for p in points:
+            print(p, ':', getPoint(p, val))
+        print('For simulation values -')
+        for p in points:
+            print(p, ':', getPoint(p, sim_res))
+
         plt.xlabel('window size')
         plt.ylabel('probability of no intersections')
         plt.legend()
         plt.savefig('intersectionsSliding.png')
         plt.show()
-    # compare sequences from 2 different bacterias
-    elif model == 'n':
-        seq_b = GetSequence(content_bacteria)
-        seq_c = GetSequence(content_bacteria_circular)
-        prob_dist_b = GetProbDist(seq_b)
-        prob_dist_c = GetProbDist(seq_c)
-        sim_res = {}
-        for i in range(max_window_size):
-            sim_res[i] = 0
-        # new_sequence_b = GenerateSeq(prob_dist_b, content_bacteria, len(content_bacteria))
-        # default_window_slices = GetDefaultDict(max_window_size, new_sequence_b)
-        for index in range(num_samples):
-            new_sequence_c = GenerateSeq(prob_dist_c, content_bacteria_circular, len(content_bacteria_circular))
-            # new_sequence_c = GenerateSeq(prob_dist_b, content_bacteria, len(content_bacteria))
-            list_window_slices = {}
 
-            for window_size in range(max_window_size-1,0,-1):
-                list_window_slices = GetDictSW(new_sequence_c, window_size, default_window_slices, 0, list_window_slices)
-                inter = GetIntersectionSW(list_window_slices, window_size)
-                if len(inter) > 1:
-                    break
-                max_match = window_size
-
-            print('sample:',index,', max windows size match:',max_match)
-            for i in range(max_match):
-                sim_res[i] += 1
-
-            # match = SequenceMatcher(None, new_sequence, content_bacteria).find_longest_match(0, len(new_sequence), 0, len(content_bacteria))
-            # print(match)
-        for i in range(max_window_size):
-            sim_res[i] = 1 - float(sim_res[i])/num_samples
-        val = GetVal(len(content_bacteria), len(content_bacteria), gc_bacteria, gc_bacteria, max_window_size, 'Slidingformula')
-        print(list(sim_res.values()))
-        print(val)
-        print(ze)
-        plt.plot(list(sim_res.values()), label = 'Sliding:Simulation')
-        plt.xlabel('window size')
-        plt.ylabel('probability of no intersections')
-        plt.legend()
-        plt.savefig('intersectionsSliding.png')
-        plt.show()
+if __name__ == "__main__":
+    # cp.enable()
+    main(sys.argv[len(sys.argv)-1])
     # cp.disable()
     # cp.print_stats()
-
-# to run, python dr.py [i|s] : i = iid model,s = sliding window model, python dr.py for results of sliding window simulations.
-if __name__ == "__main__":
-    main(sys.argv[len(sys.argv)-1])
